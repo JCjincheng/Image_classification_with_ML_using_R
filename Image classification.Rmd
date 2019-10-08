@@ -1,0 +1,479 @@
+---
+title: "Clothing type classification with different ML models"
+author: "Jincheng Xu,
+         Jennifer Lieu, 
+         Shangyao Liu"
+date: "Mar. 13. 2019"
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+highlight: github
+---
+#Contribution splits:
+Jincheng: All functions except for sampling. Code and description of SVM, Random Forest, GBM, and combined models.
+Jennifer: Report writing. Code and description of Lasso, Ridge, KNN
+Shangyao: Sampling function. Code and description of MLR, Classification Tree, Neural Network.
+
+```{r setup, include=FALSE}
+set.seed(72)
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries, echo = FALSE}
+require(randomForest)
+require(e1071)
+require(gbm)
+require(data.table)
+require(DT)
+require(caret)
+require(nnet)
+require(xgboost)
+require(class)
+require(glmnet)
+require(MASS)
+require(rpart)
+require(rlist)
+
+library("DT")
+library("data.table")
+library("e1071")
+library("class")
+library("glmnet")
+library(nnet)
+```
+
+```{r source_files}
+setwd("")
+```
+
+```{r load_data}
+test <- fread("Testset.csv")
+train <- fread("Trainset.csv")
+```
+
+```{r constants}
+n.values <- c(800, 1800, 2200)
+iterations <- 3
+test.x <- test[,-1]
+test.y <- test[,1]
+
+models.names <- c("MLR","CT","NN","lasso.model", "Ridge.model","knn.model","rf","points.for.svm","gbm.mod","combined.top3.models")
+
+
+sample_set = c("sample_800_1","sample_800_2","sample_800_3",
+      "sample_1800_1","sample_1800_2","sample_1800_3",
+      "sample_2200_1","sample_2200_2","sample_2200_3")
+```
+
+```{r clean_data}
+all(apply(test[,-1], 1, function(x)return(all(x<=255 & x>=0))))
+all(apply(train[,-1], 1, function(x)return(all(x<=255 & x>=0))))
+all(apply(train,1,function(x)return(all(is.na(x)))))
+```
+
+```{r generate_samples}
+
+##Sampling function
+
+sampling = function(traindata,size) {
+  result = list()
+  i = 1
+  
+  for (sz in size) {
+    sample = list()
+    for (ind in 1:3) {
+      sample[[ind]] = traindata[sample(x = 1:nrow(traindata), size = sz, replace = FALSE),]
+    }
+    result[[i]] = sample
+    i = i + 1
+  }
+  
+  return(result)
+}
+
+z=sampling(train,  n.values)
+sample_800_1 <- z[[1]][[1]]
+sample_800_2 <- z[[1]][[2]]
+sample_800_3 <- z[[1]][[3]]
+sample_1800_1 <- z[[2]][[1]]
+sample_1800_2 <- z[[2]][[2]]
+sample_1800_3 <- z[[2]][[3]]
+sample_2200_1 <- z[[3]][[1]]
+sample_2200_2 <- z[[3]][[2]]
+sample_2200_3 <- z[[3]][[3]]
+
+```
+
+```{r functions done by Jincheng}
+## Voting function used in combined model
+voting <- function(list){
+  if (length(unique(list))==3){
+    return (list[1])
+  }
+  else {
+    return (names(which.max(table(list))) )
+  }
+}
+
+## misclassification function for calculating C
+misclassification <- function(predict, actual){
+  return (length(which(predict != actual))/length(actual))
+}
+
+## Iteration function
+iteration = function(x){
+  ccc<-data.frame()
+  for(i in 1:9){
+    dat <- get(sample_set[i])
+    bbb <- x(get(sample_set[i]))
+    ccc<-rbind.data.frame(ccc, bbb)
+  }
+  return(ccc)
+}
+
+#Scoring Function
+scoring <- function(model,data.size){
+  itmodel <- iteration(model)
+  itmodel <- itmodel[itmodel$sample.size==data.size,]
+  scoremodel <- round(apply(itmodel[,-1], 2, mean),4)
+
+  outscore <- data.frame(itmodel[1,1],t(scoremodel))
+return(outscore)
+}
+
+scoresumm <-function(models=models.names,samples=sample_set,test=test){
+  data.tab<-data.frame()
+  for (i in 1:length(models.names)){
+    for (j in 1:3){ 
+      data.tab <- rbind(data.tab, scoring(get(models.names[i]), n.values[j]))
+    }
+  }
+  return (data.tab)
+}
+
+## Reporting function 
+reporting <- function(data=scoresumm()){
+  by.variables <- "Points"
+  setorderv(x = data, cols = by.variables, order =1)
+  return(data)
+}
+```
+
+## Introduction
+	This paper is attempting to utilize a variety of machine learning algorithms in order to categorize different pictures of clothing. The machine learning methods that we are using are: Multinomial Logistic Regression, K Nearest Neighbors, Classification Tree, Random Forest, Lasso Regression, Ridge Regression, Support Vector Machines, Generalized Boosted Machine Models, and Neural Networks, and one other model that combine the results  of some of the first nine models in order to come up with a result. Our combination model will combine the results of our top 3 individual machine learning algorithms in order to come up with a classification prediction for new clothing picture data.
+The data set sizes we will be utilizing to score our models are: 800, 1800, and 2200. We will score the models in the following fashion: .25(run time of the model and prediction)/60 + .25(size of data set)/60000 + .5(proportion of incorrect predictions). The lower the score of the model, the better of a model it is because we want a machine learning model that is quick to run, requires a low counting data set, and can accurately categorize pictures into the appropriate clothing label. There is more weight on the accuracy of the model because that is the primary goal of creating these machine learning algorithms. However, efficiency is important too, which is why there are still weights on data set size and on the run time.
+
+### Model 1: MLR
+Multinomial Logistic Regression is used to model nominal outcome variables, in which the log-odds of the outcomes are modeled as a linear combination of the predictor variables. Unlike the standard logistic regression, which can only be used to model binary target variables, in Multinomial Logistic Regressions, the target variable can take more than two values, and are not ordered variables. For example, in our project, we have the target variables: ankle boot, bag, coat, dress…in total 9 categories. The fact that this model can output more than two non-ordered variables is one advantage of the Multinomial Logistic Regression model. However, a major disadvantage of the regression model is
+There are other functions in other R packages capable of running Multinomial Regression. We chose the “multinom” function from the “nnet” package because it does not require the data to be reshaped. This provides a huge advantage when attempting to run this algorithm in R.
+
+```{r code_model1_development, eval = TRUE}
+MLR <- function(sample_train_data,sample_test_data=test){
+  A <- nrow(sample_train_data)/60000
+
+  toc <- Sys.time()
+  
+
+  mlr <- multinom(label~.,data=sample_train_data,trace=FALSE)      #fit the model
+  mlr.prd<-predict(mlr,newdata=sample_test_data[,-1])  #make prediction
+  
+  tic <- Sys.time()
+  str_mlr.prd <- as.character(mlr.prd)              #make the numeric data as charector
+  error.1 <- sum(ifelse(str_mlr.prd==sample_test_data$label,0,1))   #count how many errors occur
+  the.time.1 <- as.numeric(x = tic-toc, units = "secs")
+  c=error.1/nrow(sample_test_data)
+  
+  
+  output<-cbind(Model="MLR",setDT(round(data.frame(sample.size=nrow(sample_train_data),A=A,B=min(1,the.time.1/60),C=c,Points=(0.25*A +0.25*min(1,the.time.1/60) +0.5*c)),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model1}
+iteration(MLR)
+```
+
+### Model 2:  Classification tree
+Classification Trees are non-parametric methods to recursively partition the data into more “pure” nodes, based on splitting rules. One advantage of the Decision Tree is that if there is a highly non-linear and complex relationship between dependent and independent variables, the Classification Tree will still yield a low testing error. Additionally, Classification Tree models are simpler to interpret than other models. 
+Two disadvantages of Classification Trees are: overfitting and being unable to take continuous variables as inputs. Overfitting is one of the most practical difficulties for Classification Tree models. While working with continuous numerical variables, the Decision Tree loses information as it places variables in different categories.
+In order to run the Classification Trees, we will need to install the “rpart” package and after loading out train data, use the “rpart” function from the “rpart” package to create a model using our training data. Since the type of our target variable is categorical, we add type="class" in the prediction function. From the result we see that C (the classification testing error calculation) is relatively higher than the other algorithms due to the overfitting issue mentioned earlier. However, the runtime and overall score were not too much higher than the scores of the other machine learning models.
+
+```{r code_model2_development, eval = TRUE}
+CT <-function(sample_train_data,sample_test_data=test){
+  toc <- Sys.time()
+  
+  ct <- rpart(label~.,data=sample_train_data)       #fit the model
+  ct.prd<-predict(ct,newdata=sample_test_data[,-1],type="class")  #make prediction
+  str_ct.prd <- as.character(ct.prd)              #make the numeric data as charector
+  error.3 <- sum(ifelse(str_ct.prd==sample_test_data$label,0,1))   #count how many errors occur
+  
+  tic <- Sys.time()
+  the.time.3 <- as.numeric(x = tic-toc, units = "secs")
+  
+  a<- nrow(sample_train_data) /nrow(train)
+  b<-min(1,the.time.3/60)
+  c<-error.3/nrow(sample_test_data)
+
+  output <- cbind(Model="Classification Tree", setDT(round(data.frame(sample.size=nrow(sample_train_data), A=a, B=b, C=c, Points=0.25*a+0.25*b+0.5*c),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model2}
+iteration(CT)
+```
+
+### Model 3:  Neural Network
+A Neural Network Classifier is a software system that predicts the value of a categorical variable. Neural networks have received a lot of attention for their abilities to ‘learn’ relationships among variables. One advantage of Neural Networks is that it can perform model fitting that doesn’t rely on conventional assumptions necessary for standard models. Another advantage is that it can also effectively handle multivariate response data and an incredibly large amount of model parameters.
+In order to run the Neural Network algorithm, we need to install the “nnet” package and download our training data into R. We then use the “nnet” function from the “nnet” package to estimate a neural network model using the train data that we downloaded. To balance out the running time and the accuracy, we find the larger size we put, the more accurate but more time, we got error message when size reaches 20, so we changed the default  MaxNWt value to 10000 to allow larger sizes. MaxNWts is the maximum allowable number of weights. And by increasing MaxNWts, it  will require more computational power, and thus increase the runtime of our code and the overall score of our model. By testing again and again, size=100 and MaxNWts =10000.yields a lower error relative to other values we attempted.
+
+
+```{r code_model3_development, eval = TRUE}
+NN <- function(sample_train_data,sample_test_data=test){
+  toc <- Sys.time()
+
+  nn <- nnet(as.factor(label)~.,data=sample_train_data,size = 10,trace=FALSE)       #fit the model
+  nn.prd<-predict(nn,newdata=sample_test_data[,-1],type = 'class')  #make prediction
+  str_nn.prd <- as.character(nn.prd)              #make the numeric data as charector
+  
+  tic <- Sys.time()
+  the.time.9 <- as.numeric(x = tic-toc, units = "secs")
+  
+  error.9 <- mean(str_nn.prd!=sample_test_data$label) #count how many errors occur
+  
+  a<- nrow(sample_train_data) /nrow(train)
+  b<-min(1,the.time.9/60)
+  c<-error.9
+  output <- cbind(Model= "Neural Networks",setDT(round(data.frame( sample.size=nrow(sample_train_data), A=a, B=b, C=c, Points=0.25*a+0.25*b+0.5*c),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model3}
+iteration(NN)
+```
+
+### Model 4 lasso
+	The Lasso Regression model is a type of generalized linear model that comes from the glmnet package in R, utilizing the glmnet model by setting alpha to be 1. The regression model is very helpful when tackling issues with overfitting.  Lasso Regression was created in order to improve on the already existing regression models through changing the model fitting algorithm in order to choose a subset of the variables provided for use in the final model rather than using all of them. It prevents issues of overfitting by penalizing the objective function that we are attempting to minimize when fitting the Lasso Regression model. However, one disadvantage in using Lasso Regression is that it can sometimes discriminate against specific variables that might be important to the model when trying to lessen the amount of variables used in the model. We chose this model because some of the pixels may not be as helpful in terms of predicting the picture. For example, if a shirt picture is centered, and there is random background pixels near the edges of the picture, that pixel may not add much information to what qualifies as a shirt picture. 
+	When utilizing the glmnet function in order to fit the data set to the Lasso Regression model, we will also need to fix a lambda parameter. However, this lambda will be preselected for you unless otherwise stated, which is why we will not choose a lambda parameter. We will also set the family parameter to be multinomial, due to the fact that this model is attempting to choose from multiple classification options, rather than just two.  
+
+```{r code_model4_development, eval = TRUE}
+lasso.model <- function(train, testx=test.x, testy=test.y){
+   mat <- as.matrix(train[,-1])
+   toc <- Sys.time()
+  factory <- factor(train$label)
+  glmtemp <-  glmnet(x=mat, y= factory, family=("multinomial"), alpha=1, standardize=T)
+  predglm <- predict(glmtemp, newx = as.matrix(testx), type="class")
+  tic <- Sys.time()
+  the.time <- as.numeric(x = tic-toc, units = "secs")
+Blasso<- min(the.time/60,1)
+Classo <- mean(as.vector(predglm) != test$label)
+Alasso<- dim(train)[1]/60000
+   output <- cbind(Model = "Lasso Regression", setDT(round(data.frame(sample.size=nrow(train), A=Alasso, B=min(Blasso,1), C=Classo, Points=0.25*Alasso+0.25*Blasso+0.5*Classo),4)))
+  return (output)
+}
+
+```
+
+```{r load_model4}
+iteration(lasso.model)
+```
+
+### Model 5 Ridge
+	The Ridge Regression algorithm is a type of generalized linear model that comes from the glmnet package in R, utilizing the glmnet model by setting alpha to be 0. The regression model is very helpful when tackling issues of multicollinearity. Ridge regression was created in order to improve on the already existing regression models through using L2 regularization in order to give preference to solutions with smaller norms. The Ridge Regression machine learning model decreases the testing error by decreasing large the coefficients of the regression model to reduce overfitting. However, this model does not make the model anymore interpretable because it does not help with covariate selection. We chose the Ridge Regression as one of our machine learning models because like the Lasso Regression model, this method of classification prediction helps remedy cases of overfitting the model. The drawback is that it is mainly used for cases with multicollinearity. With pixel data, we do not really observe multicollinearity in our data.
+	When utilizing the glmnet function in order to fit the data set to the Ridge Regression model, we will also need to fix a lambda parameter. However, this lambda will be preselected for you unless otherwise stated, which is why we will not choose a lambda parameter. We will also set the family parameter to be multinomial, due to the fact that this model is attempting to choose from multiple classification options, rather than just two.  
+
+```{r code_model5_development, eval = TRUE}
+Ridge.model <- function(train, testx=test.x, testy=test.y){
+   mat <- as.matrix(train[,-1])
+   toc <- Sys.time()
+  factory <- factor(train$label)
+  glmtemp <-  glmnet(x=mat, y= factory, family=("multinomial"), alpha=0, standardize=T)
+  predglm <- predict(glmtemp, newx = as.matrix(testx), type="class")
+  tic <- Sys.time()
+  the.time <- as.numeric(x = tic-toc, units = "secs")
+Bridge<- min(the.time/60,1)
+Cridge<- mean(as.vector(predglm) != test$label)
+Aridge<- dim(train)[1]/60000
+   output <- cbind(Model = "Ridge Model",setDT(round(data.frame(sample.size=nrow(train), A=Aridge, B=min(Bridge,1), C=Cridge, Points=0.25*Aridge+0.25*Bridge+0.5*Cridge),4)))
+  return (output)
+}
+
+```
+
+```{r load_model5}
+iteration(Ridge.model)
+```
+
+### Model 6 KNN
+	The K Nearest Neighbors algorithm is a type of machine learning algorithm that attempts to classify different observations within a data set by comparing them to the closest K neighbors to that observation point. This algorithm selects the K nearest neighbors from the lowest euclidean distances between the data point we’re trying to classify and the training data set that we use in order to train the K Nearest Neighbors model. 
+	The K is chosen based on how many nearest neighbors you want to take into consideration when deciding on the classification of your observed picture data. Our group chose our K value by running the model through the “tune” function in R and testing the knn function on K=1,2,...,25 in order to see which K yielded the lowest error for each data set. We then ran the knn function from the “class” package and found that K Nearest Neighbors is efficient, predictive, and does not require a large data set. Those reasons are why we chose to add K Nearest Neighbors as one of our ten models. The disadvantage of K Nearest Neighbors method is that it does not really learn anything from the training data. It merely uses the training data for the classification itself, and is thus considered a “lazy learner.”
+
+```{r code_model6_development, eval = TRUE}
+knn.model <- function(train, testx=test.x, testy=test.y){
+  mat <- as.matrix(train[,-1])
+  toc <- Sys.time()
+  knnres <- knn(mat, as.matrix(testx), k=5, cl= as.factor(train$label))
+  tic <- Sys.time()
+  the.time <- as.numeric(x = tic-toc, units = "secs")
+  Bknn <- the.time/60
+  Cknn <- mean(as.vector(knnres) != testy)
+  Aknn <- dim(train)[1]/60000
+  model.name= "K Nearest Neighbors"
+   output <- cbind(Model= model.name, setDT(round(data.frame(sample.size=nrow(train), A=Aknn, B=min(Bknn,1), C=Cknn, Points=0.25*Aknn+0.25*Bknn+0.5*Cknn),4)))
+  return (output)
+}
+
+```
+
+```{r load_model6}
+iteration(knn.model)
+```
+
+### Model 7 Random Forest
+The Random Forest  machine learning algorithm randomly chooses samples from the training data, which makes our model more robust, and less likely to overfit the model. Because the Random Forest method usually creates a relatively accurate prediction and is less likely to overfit the model, the testing error calculation would be low. That’s the primary reason why we want to use this method. 
+The main drawback of random forest is its computational cost. Having a higher computation cost means that the algorithm runs pretty slowly due to all the calculations that it must make when growing decision trees. However, increasing the amount of decision trees that exist in our forest increases the  accuracy of our model when attempting to predict the classification of a new picture. In our case, the B value (run-time calculation) will be negatively impacted by this. 
+The algorithm behind random forest is to parallelly form decision trees using random samples from our training dataset and aggregate them together to get a more accurate prediction. It searches for the best features among a random subset of features.
+I used the default number of trees=100, because after trying out different numbers, the scores don’t change much. And what number of trees work better for training dataset may not perform well on test dataset, so it doesn’t make sense to change it. 
+
+```{r code_model7_development, eval = TRUE}
+rf <- function(train.dat, testx=test.x, testy=test.y){
+  A <- nrow(train.dat)/60000
+
+  toc <- Sys.time()
+  
+  sample.rf <- randomForest(as.factor(label) ~ ., data = train.dat, importance=T, replace=T)
+  predicted.rf <- predict(sample.rf, testx)
+  
+  tic <- Sys.time()
+  time.rf <- as.numeric(x=tic-toc, units="secs")
+  
+  c.rf <- mean(as.vector(predicted.rf)!=testy)
+  
+  output <- cbind(Model = "Random Forests",setDT(round(data.frame( sample.size=nrow(train.dat), A=A, B=min(time.rf/60,1), C=c.rf, Points=0.25*A+0.25*min(time.rf/60,1)+0.5*c.rf),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model7}
+iteration(rf)
+```
+
+### Model 8 SVM
+Support vector machines is a method that works very well with classifications, even for higher dimensional datasets. It is also a good algorithm for unstructured or semi-structured data, such as images. Another advantage of SVM is that it reduces the risk of overfitting. The disadvantages of using SVM is that choosing a good kernel function can be difficult, and depending on the kernel function we choose, the interpretation of the model may be hard. But in our case, after testing various kernel functions, we found that the “linear” kernal function yielded the lowest errors. Since the goal of the project is to use our model to accurately classify different images of clothing, the interpretation of the model does not matter. Due to the advantages listed above, SVM should work well for the purposes of our project. Also, because the algorithm behind SVM is to construct a hyperplane with n variables, in our case n pixels, this differentiates our classes well. The default c-classification works well for multinomial dataset, so we did not alter the value given to us.
+```{r code_model8_development, eval = TRUE}
+points.for.svm <- function(train.dat, testx=test.x, testy=test.y){
+  A <- nrow(train.dat)/60000
+  
+  toc <- Sys.time()
+  svm.model <- svm(as.factor(label) ~ ., data = train.dat, kernel="linear")
+  predicted.svm <- predict(svm.model, testx)
+
+  tic <- Sys.time()
+  time.svm <- as.numeric(x=tic-toc, units="secs")
+  
+  c.svm <- mean(as.vector(predicted.svm)!=testy)
+  
+   output <- cbind(Model="SVM",setDT(round(data.frame( sample.size=nrow(train.dat), A=A, B=min(time.svm/60,1), C=c.svm, Points=0.25*A+0.25*min(time.svm/60,1)+0.5*c.svm),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model8}
+iteration(points.for.svm)
+```
+
+### Model 9 GBM
+Gradient Boosting Model utilizes decision trees in order to classify the picture data we have as different labels. The algorithm builds one tree at a time in order to reduce errors, and improves on the model step by step. The process is stochastic and takes other predictors’ impacts into consideration. It is also robust to outliers, which plays a large impact on its accurate predictions of classifications of the testing data.
+One drawback of GBM is that it is not fully updated on R. The “response” type only outputs the label name itself for binary response variables. For multinomial cases, we are outputting probabilities for each label, rather than just the label of prediction. Due to the nature of function, we require another line of code in order to find the label with the maximum probability. As a result, implementing this algorithm takes longer to complete, which increases the run-time score.
+We chose “multinomial” for the distribution parameter because that’s the parameter for multi-classification.  We chose interaction.depth to be 1 because choosing a number higher than one will increase the run-time score, with little to no benefit added to the model for the purposes we are intending to use it for. We use n.trees as 100, because that is the default for gbm.obj.
+Because Gradient Boosting Model offers multinomial choice, works well with large data sets, and is very robust to outliers, we chose it to be one of our ten models of classification.
+
+```{r code_model9_development, eval = TRUE}
+gbm.mod <- function(train.dat, testx=test.x, testy=test.y){
+  A <- nrow(train.dat)/60000
+  toc <- Sys.time()
+  
+  gbm.obj <- gbm(label~., data=train.dat, interaction.depth=1, distribution="multinomial")
+  prob.label <- predict(gbm.obj, n.trees=100, newdata=testx,type="response")[,,1]
+  labels <- colnames(prob.label)
+  pred.label<-apply(prob.label, 1, which.max)
+  tic <- Sys.time()
+  time.gbm <- as.numeric(x=tic-toc, units="secs")
+  
+  c.gbm <- mean(labels[pred.label]!=testy)
+  output <- cbind(Model="GBM",setDT(round(data.frame(sample.size=nrow(train.dat), A=A, B=min(time.gbm/60,1), C=c.gbm, Points=0.25*A+0.25*min(time.gbm/60,1)+0.5*c.gbm),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model9}
+iteration(gbm.mod)
+```
+
+### Model 10 Combined model with top 3 performances
+	This first combined machine learning model takes the results of the Support Vectors Machine, Random Forest, and Multinomial Logistic Regression models in order to classify different pictures of clothing. We chose these three algorithms because they yielded the lowest scores on average among the different data sets that we have tested before choosing the sample size of our final 3 data sets. 
+It works by aggregating the results of the three different algorithms and choosing the classification by the majority-rules method. So if at least two of the algorithms classify the picture data with the same label, then the picture is predicted to be classified with said label. However, if there is a 3-way tie between all the classification methods, then we will utilize the Support Vectors Machine method in order to choose the classification due to the fact that it yields the lowest prediction error of the three. 
+The biggest advantage and reason of why we chose this model is because of the sheer predictive and efficient power of the model. Because we are combining the three best models we have in terms of the scores, it  will yield the best results in terms of predictiveness, and efficiency. One of the disadvantages is that the algorithm is dependent on the results of 3 other algorithms, and although we do not take into account the run time of the 3 other algorithms when calculating our score, in practice, we would need to take that into account in terms of efficiency when running our combined model.
+
+
+```{r code_model10_development, eval = TRUE}
+combined.top3.models <- function(train.dat, testx=test.x, testy=test.y){
+  A <- nrow(train.dat)/60000
+  
+  svm.model <- svm(as.factor(label) ~ ., data = train.dat, kernel="linear")
+  predicted.svm <- as.vector(predict(svm.model, testx))
+  
+  sample.rf <- randomForest(as.factor(label) ~ ., data = train.dat, importance=T, replace=T)
+  predicted.rf <- as.vector(predict(sample.rf, testx))
+  
+  
+  mlr <- multinom(as.factor(label)~.,data=train.dat,trace=FALSE)      #fit the model
+  mlr.prd<-as.vector(predict(mlr,newdata=testx))  #make prediction
+  
+  toc <- Sys.time()
+  
+  predicted.value <- cbind.data.frame(predicted.svm, predicted.rf, mlr.prd)
+  combined.predict <- apply(predicted.value, 1, voting)
+
+  tic <- Sys.time()
+  time.combined <- as.numeric(x=tic-toc, units="secs")
+  
+  c.combined <- mean(combined.predict!=testy)
+  
+  output <- cbind(Model="Combined Top 3 Models", setDT(round(data.frame(sample.size=nrow(train.dat), A=A, B=min(time.combined/60,1), C=c.combined, Points=0.25*A+0.25*min(time.combined/60,1)+0.5*c.combined),4)))
+  
+  return (output)
+}
+```
+
+```{r load_model10}
+iteration(combined.top3.models)
+```
+
+## Scoreboard
+
+```{r scoreboard}
+reporting()
+```
+
+## Discussion
+When referring to the final scoreboard, we noticed that our combined model and Support Vector Machines model performed the best in terms of overall performance and in terms of accuracy, even when using higher sample sizes. This shows us that utilizing higher sample sizes to train the dataset is worth the additional computational power required to run the entire program when working with the correct algorithm. 
+
+Because our combined model did not include the runtime of all three algorithms in the calculation of the final score, and it aggregated the results of our top 3 predictive models in order to classify our image data, the combined model yielded the best performance. Support Vector Machines also performed very well because of the advantages of using this algorithm. This algorithm is specifically meant to classify high dimensional data sets, even if it is unstructured or semi-structured, such as the image data that we received. Due to the nature of the two algorithms used, we are not surprised that these two performed the best.
+
+We found that the Ridge Regression Model performed the worst out of all of our other models with roughly a .04 difference in the score between the Ridge Regression Model, and the second lowest performing model. The reason why we believe that Ridge performed so poorly is because of the goal of the Ridge Regression method. This Machine Learning function was created to remedy multicollinearity and overfitting. We do not observe many issues with multicollineary and overfitting with image data becuase we know that all of the pixels are important in order to create the picture as a whole.
+
+Overall, we learned that it is extremely important to understand the nature of our data sets, and algorithms of choice before attempting to implement them. Although all the algorithms presented to us are useful with specific data sets, there was definitely a large difference in terms accuracy and overall performance score with algorithms that are specifically meant for our data type, and algorithms that are created for other data types. Data intuition and exploratory analysis helped us narrow down the options and predict which would be better performing algorithms earlier on.
+
+## References
+1. stackoverflow.com/
+2. statmethods.net/
+
+
